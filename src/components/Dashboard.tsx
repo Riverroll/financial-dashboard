@@ -8,7 +8,7 @@ import classNames from 'classnames';
 import { format } from 'date-fns';
 import ProjectCard from './ProjectCard';
 import TransactionList from './TransactionList';
-import OverviewCharts from './OverviewCharts';
+import OverviewCharts from './OverviewChart';
 import ProjectBreakdown from './ProjectBreakdown';
 
 interface DashboardProps {

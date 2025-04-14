@@ -26,12 +26,33 @@ const TransactionUploader: React.FC<TransactionUploaderProps> = ({
         setIsLoading(true);
         
         const file = acceptedFiles[0];
-        const transactions = await parseTransactionsFromPDF(file);
         
-        onTransactionsLoaded(transactions);
+        // Validate file type before processing
+        if (file.type !== 'application/pdf') {
+          throw new Error('Please upload a valid PDF file. The file type detected was: ' + file.type);
+        }
+        
+        // Check file size (limit to 10MB)
+        if (file.size > 10 * 1024 * 1024) {
+          throw new Error('File is too large. Please upload a PDF less than 10MB.');
+        }
+        
+        try {
+          const transactions = await parseTransactionsFromPDF(file);
+          
+          // Validate the result
+          if (!Array.isArray(transactions) || transactions.length === 0) {
+            throw new Error('No valid transactions were found in the PDF. Please ensure this is a Jago Codenito statement.');
+          }
+          
+          onTransactionsLoaded(transactions);
+        } catch (pdfError) {
+          console.error("PDF parsing error:", pdfError);
+          throw pdfError; // Rethrow to be caught by the outer try/catch
+        }
       } catch (err) {
         console.error("Error processing PDF:", err);
-        setError("Failed to process the PDF. Please make sure it's a valid Jago Codenito statement.");
+        setError(err instanceof Error ? err.message : "Failed to process the PDF. Please make sure it's a valid Jago Codenito statement.");
       } finally {
         setIsLoading(false);
       }
@@ -94,6 +115,7 @@ const TransactionUploader: React.FC<TransactionUploaderProps> = ({
           <li>The system will automatically extract transactions</li>
           <li>Transactions will be categorized by project based on descriptions</li>
           <li>Financial analysis including CAPEX/OPEX and profit margins will be generated</li>
+          <li>Files must be valid PDF files under 10MB in size</li>
         </ul>
       </div>
     </div>

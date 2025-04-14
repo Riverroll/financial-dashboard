@@ -22,6 +22,15 @@ const OPEX_KEYWORDS = ['WORKSPACE', 'SUBSCRIPTION', 'SALARY', 'JOKI', 'TRANSPORT
 export async function parseTransactionsFromPDF(file: File): Promise<Transaction[]> {
   try {
     const buffer = await file.arrayBuffer();
+    
+    // Check if the file is actually a PDF by checking the file signature
+    const header = new Uint8Array(buffer.slice(0, 5));
+    const headerString = String.fromCharCode(...header);
+    
+    if (headerString !== '%PDF-') {
+      throw new Error('The uploaded file does not appear to be a valid PDF.');
+    }
+    
     const data = await pdfParse(buffer);
     
     // Extract raw text
@@ -170,6 +179,12 @@ export async function parseTransactionsFromPDF(file: File): Promise<Transaction[
     return transactions.sort((a, b) => a.date.getTime() - b.date.getTime());
   } catch (error) {
     console.error('Error parsing PDF:', error);
-    throw new Error('Failed to parse PDF file');
+    
+    // Better error handling with specific messages
+    if (error instanceof SyntaxError && error.message.includes('Unexpected token')) {
+      throw new Error('The server returned an HTML error page instead of PDF data. Please check your network connection and try again.');
+    }
+    
+    throw new Error('Failed to parse the PDF file: ' + (error instanceof Error ? error.message : String(error)));
   }
 }
