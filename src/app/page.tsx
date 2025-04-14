@@ -2,47 +2,100 @@
 "use client";
 
 import { useState } from "react";
-import Image from "next/image";
 import TransactionUploader from "@/components/TransactionUploader";
+import ProjectAssignmentScreen from "@/components/ProjectAssignmentScreen";
 import Dashboard from "@/components/Dashboard";
-import { Transaction } from "@/types";
+import { Transaction, Project } from "@/types";
 
 export default function Home() {
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [parsedTransactions, setParsedTransactions] = useState<Transaction[] | null>(null);
+  const [finalTransactions, setFinalTransactions] = useState<Transaction[] | null>(null);
+  const [existingProjects, setExistingProjects] = useState<Project[]>([]);
 
-  const handleTransactionsLoaded = (newTransactions: Transaction[]) => {
-    setTransactions(newTransactions);
+  const handleTransactionsLoaded = (transactions: Transaction[]) => {
+    setParsedTransactions(transactions);
+  };
+
+  const handleProjectAssignmentComplete = (assignedTransactions: Transaction[]) => {
+    setFinalTransactions(assignedTransactions);
+    
+    // Process projects based on assigned transactions
+    const projectMap = new Map<string, Project>();
+    
+    assignedTransactions.forEach(transaction => {
+      const projectName = transaction.project || 'Unassigned';
+      
+      if (!projectMap.has(projectName)) {
+        projectMap.set(projectName, {
+          id: crypto.randomUUID(),
+          name: projectName,
+          income: 0,
+          expenses: 0,
+          profit: 0,
+          profitMargin: 0,
+          capex: 0,
+          opex: 0,
+          transactions: []
+        });
+      }
+      
+      const project = projectMap.get(projectName)!;
+      project.transactions.push(transaction);
+      
+      if (transaction.amount > 0) {
+        project.income += transaction.amount;
+      } else {
+        project.expenses += Math.abs(transaction.amount);
+        
+        if (transaction.expenditureType === 'CAPEX') {
+          project.capex += Math.abs(transaction.amount);
+        } else {
+          project.opex += Math.abs(transaction.amount);
+        }
+      }
+    });
+    
+    // Calculate profit and profit margin for each project
+    projectMap.forEach(project => {
+      project.profit = project.income - project.expenses;
+      project.profitMargin = project.income > 0 ? (project.profit / project.income) * 100 : 0;
+    });
+    
+    setExistingProjects(Array.from(projectMap.values()));
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
-      <header className="bg-white dark:bg-gray-800 shadow">
-        <div className="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8 flex items-center justify-between">
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Codenito Financial Dashboard</h1>
-          <div className="flex items-center gap-4">
-            {transactions.length > 0 && (
-              <span className="text-sm text-gray-500 dark:text-gray-400">
-                {transactions.length} transactions loaded
-              </span>
-            )}
-          </div>
+    <main className="container mx-auto px-4 py-8">
+      <h1 className="text-3xl font-bold mb-8 text-center">Codenito Finance Analyzer</h1>
+      
+      {!parsedTransactions && (
+        <TransactionUploader 
+          onTransactionsLoaded={handleTransactionsLoaded} 
+          setIsLoading={setIsLoading} 
+        />
+      )}
+      
+      {isLoading && (
+        <div className="flex justify-center mt-8">
+          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
         </div>
-      </header>
-
-      <main className="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
-        {transactions.length === 0 ? (
-          <div className="text-center py-12">
-            <h2 className="text-xl font-semibold mb-6">Upload Your Bank Statement</h2>
-            <TransactionUploader 
-              onTransactionsLoaded={handleTransactionsLoaded} 
-              setIsLoading={setIsLoading}
-            />
-          </div>
-        ) : (
-          <Dashboard transactions={transactions} />
-        )}
-      </main>
-    </div>
+      )}
+      
+      {parsedTransactions && !finalTransactions && (
+        <ProjectAssignmentScreen 
+          transactions={parsedTransactions}
+          onComplete={handleProjectAssignmentComplete}
+          existingProjects={existingProjects}
+        />
+      )}
+      
+      {finalTransactions && existingProjects.length > 0 && (
+        <Dashboard 
+          transactions={finalTransactions} 
+          projects={existingProjects} 
+        />
+      )}
+    </main>
   );
 }

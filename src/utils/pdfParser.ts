@@ -1,190 +1,300 @@
 // src/utils/pdfParser.ts
-import pdfParse from 'pdf-parse';
 import { Transaction } from '@/types';
 import { v4 as uuidv4 } from 'uuid';
+import * as pdfjs from 'pdfjs-dist';
 
-// Keywords for project detection
-const PROJECT_KEYWORDS: Record<string, string> = {
-  'CLA': 'Client CLA',
-  'UI UX': 'UI/UX Design',
-  'REDESIGN': 'Redesign Project',
-  'VPS': 'VPS Infrastructure',
-  'CODENITO': 'Codenito Core',
-  'GOOGLE WORKSPACE': 'Workspace',
-  'WATZAP': 'WatZap Project',
-  'HOSTINGER': 'Web Hosting',
-};
+// Make sure the PDF.js API version matches the worker version
+const pdfjsVersion = '3.11.174';
+const pdfjsWorker = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsVersion}/pdf.worker.min.js`;
+pdfjs.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
 // Keywords for CAPEX vs OPEX
 const CAPEX_KEYWORDS = ['VPS', 'DOMAIN', 'LICENSE', 'HOSTING'];
 const OPEX_KEYWORDS = ['WORKSPACE', 'SUBSCRIPTION', 'SALARY', 'JOKI', 'TRANSPORT', 'FOOD'];
 
+// Debug function to log the extracted text structure
+function logPdfStructure(text: string): void {
+  console.log('PDF Structure:');
+  console.log('-------------');
+  const lines = text.split('\n');
+  lines.forEach((line, index) => {
+    if (line.trim()) {
+      console.log(`Line ${index + 1}: "${line}"`);
+    }
+  });
+  console.log('-------------');
+}
+
 export async function parseTransactionsFromPDF(file: File): Promise<Transaction[]> {
   try {
     const buffer = await file.arrayBuffer();
     
-    // Check if the file is actually a PDF by checking the file signature
-    const header = new Uint8Array(buffer.slice(0, 5));
-    const headerString = String.fromCharCode(...header);
+    // Load the PDF document using PDF.js
+    const loadingTask = pdfjs.getDocument({ data: buffer });
+    const pdf = await loadingTask.promise;
     
-    if (headerString !== '%PDF-') {
-      throw new Error('The uploaded file does not appear to be a valid PDF.');
+    const numPages = pdf.numPages;
+    let text = '';
+    
+    // Extract text from all pages
+    for (let i = 1; i <= numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      
+      // Extract text with position information to better preserve layout
+      const items = content.items;
+      
+      // Sort items by vertical position (y) first, then horizontal (x)
+      items.sort((a, b) => {
+        if ('transform' in a && 'transform' in b) {
+          // Get y position (typical location is at index 5 in transform array)
+          const yA = a.transform[5];
+          const yB = b.transform[5];
+          
+          // If y positions are close, sort by x
+          if (Math.abs(yA - yB) < 5) {
+            return a.transform[4] - b.transform[4];
+          }
+          
+          // Otherwise sort by y in descending order (top to bottom)
+          return yB - yA;
+        }
+        return 0;
+      });
+      
+      // Group items by line (based on y position)
+      const lines: any[][] = [];
+      let currentLine: any[] = [];
+      let lastY = 0;
+      
+      items.forEach(item => {
+        if ('str' in item && item.str.trim()) {
+          if ('transform' in item) {
+            const y = item.transform[5];
+            
+            // If this is a new line (y position differs significantly)
+            if (currentLine.length > 0 && Math.abs(y - lastY) > 5) {
+              lines.push([...currentLine]);
+              currentLine = [];
+            }
+            
+            currentLine.push(item);
+            lastY = y;
+          }
+        }
+      });
+      
+      // Add the last line if not empty
+      if (currentLine.length > 0) {
+        lines.push([...currentLine]);
+      }
+      
+      // Convert grouped items to lines of text
+      lines.forEach(lineItems => {
+        // Sort items in a line by x position
+        lineItems.sort((a, b) => a.transform[4] - b.transform[4]);
+        
+        // Extract text from items
+        const lineText = lineItems.map(item => 'str' in item ? item.str : '').join(' ');
+        text += lineText + '\n';
+      });
     }
     
-    const data = await pdfParse(buffer);
+    // Log the extracted text structure for debugging
+    logPdfStructure(text);
     
-    // Extract raw text
-    const text = data.text;
-    
-    // Split into lines and find the transaction rows
+    // Process the extracted text
     const lines = text.split('\n');
     const transactions: Transaction[] = [];
     
-    let inTransactionSection = false;
-    let currentMonth = '';
+    // More flexible pattern matching for transaction detection
+    let currentDate: Date | null = null;
+    let currentTransaction: Partial<Transaction> | null = null;
+    
+    // Enhanced month detection to include more formats
+    const monthRegex = /(January|February|March|April|May|June|July|August|September|October|November|December)(\s+\d{4})?/i;
     
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
       
-      // Detect month headers
-      if (line.match(/^(January|February|March|April|May|June|July|August|September|October|November|December) \d{4}$/)) {
-        currentMonth = line;
-        inTransactionSection = true;
-        continue;
-      }
+      if (!line) continue;
       
-      // Skip lines until we reach the transaction section
-      if (!inTransactionSection && !line.match(/^(January|February|March|April|May|June|July|August|September|October|November|December) \d{4}$/)) {
-        continue;
-      }
+      // Check for date patterns
+      // Common formats: "DD MMM YYYY", "DD/MM/YYYY", "YYYY-MM-DD"
+      const datePatterns = [
+        /(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})/i,
+        /(\d{1,2})\/(\d{1,2})\/(\d{4})/,
+        /(\d{4})-(\d{1,2})-(\d{1,2})/
+      ];
       
-      // Skip header lines
-      if (line.includes('Date & Time') || line.includes('Source/Destination') || line.includes('Transaction Details')) {
-        continue;
-      }
+      let isDateLine = false;
+      let extractedDate: Date | null = null;
       
-      // Parse transaction line
-      // Format expected: Date Time | Source/Destination | Transaction Details | Notes | Amount | Balance
-      
-      // Check if line contains date pattern DD MMM YYYY
-      const dateMatch = line.match(/^(\d{2}) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (\d{4})/);
-      
-      if (dateMatch) {
-        // This is a date line, the beginning of a transaction
-        const datePart = line.substring(0, 10);
-        const timePart = lines[i + 1]?.trim();
-        const sourcePart = lines[i + 2]?.trim();
-        const destinationPart = lines[i + 3]?.trim();
-        const detailsPart = lines[i + 4]?.trim();
-        const notesPart = lines[i + 5]?.trim();
-        const amountPart = lines[i + 6]?.trim().replace(/[.,]/g, '');
-        const balancePart = lines[i + 7]?.trim().replace(/[.,]/g, '');
-        
-        // Skip ahead to next transaction
-        i += 7;
-        
-        // Try to parse the date
-        const dateStr = `${datePart} ${currentMonth.split(' ')[1]}`;
-        const date = new Date(dateStr);
-        
-        if (isNaN(date.getTime())) {
-          // Skip invalid dates
-          continue;
-        }
-        
-        // Parse amount
-        const amount = parseFloat(amountPart.replace(/[+\-]/g, ''));
-        const isIncome = amountPart.startsWith('+');
-        
-        // Parse balance
-        const balance = parseFloat(balancePart);
-        
-        // Determine transaction type
-        let type: Transaction['type'] = 'transfer';
-        if (detailsPart.includes('Incoming Transfer')) {
-          type = 'income';
-        } else if (detailsPart.includes('Outgoing Transfer')) {
-          type = 'expense';
-        } else if (detailsPart.includes('Interest')) {
-          type = 'interest';
-        } else if (detailsPart.includes('Tax')) {
-          type = 'tax';
-        } else if (amountPart.startsWith('+')) {
-          type = 'income';
-        } else if (amountPart.startsWith('-')) {
-          type = 'expense';
-        }
-        
-        // Categorize by project
-        let project = '';
-        for (const [keyword, projectName] of Object.entries(PROJECT_KEYWORDS)) {
-          if (notesPart.toUpperCase().includes(keyword) || 
-              detailsPart.toUpperCase().includes(keyword) || 
-              sourcePart.toUpperCase().includes(keyword)) {
-            project = projectName;
-            break;
-          }
-        }
-        
-        // Determine if CAPEX or OPEX
-        let expenditureType: 'CAPEX' | 'OPEX' | undefined;
-        
-        if (type === 'expense') {
-          // Check for CAPEX keywords
-          for (const keyword of CAPEX_KEYWORDS) {
-            if (notesPart.toUpperCase().includes(keyword) || 
-                detailsPart.toUpperCase().includes(keyword)) {
-              expenditureType = 'CAPEX';
-              break;
-            }
+      for (const pattern of datePatterns) {
+        const match = line.match(pattern);
+        if (match) {
+          isDateLine = true;
+          
+          // Parse the date based on the pattern
+          if (pattern === datePatterns[0]) {
+            // DD MMM YYYY
+            const day = match[1];
+            const month = match[2];
+            const year = match[3];
+            extractedDate = new Date(`${day} ${month} ${year}`);
+          } else if (pattern === datePatterns[1]) {
+            // DD/MM/YYYY
+            const day = match[1];
+            const month = match[2];
+            const year = match[3];
+            extractedDate = new Date(`${year}-${month}-${day}`);
+          } else if (pattern === datePatterns[2]) {
+            // YYYY-MM-DD
+            extractedDate = new Date(match[0]);
           }
           
-          // If not CAPEX, check for OPEX keywords
-          if (!expenditureType) {
-            for (const keyword of OPEX_KEYWORDS) {
-              if (notesPart.toUpperCase().includes(keyword) || 
-                  detailsPart.toUpperCase().includes(keyword)) {
-                expenditureType = 'OPEX';
+          break;
+        }
+      }
+      
+      // If we found a date, start a new transaction
+      if (isDateLine && extractedDate && !isNaN(extractedDate.getTime())) {
+        // If we have a partially built transaction, save it
+        if (currentTransaction && currentTransaction.date && currentTransaction.amount) {
+          transactions.push({
+            id: uuidv4(),
+            date: currentTransaction.date,
+            amount: currentTransaction.amount,
+            description: currentTransaction.description || '',
+            source: currentTransaction.source || '',
+            destination: currentTransaction.destination || '',
+            notes: currentTransaction.notes || '',
+            balance: currentTransaction.balance || 0,
+            type: currentTransaction.type || 'transfer',
+            project: '',
+            expenditureType: currentTransaction.expenditureType,
+          } as Transaction);
+        }
+        
+        // Start a new transaction
+        currentTransaction = {
+          date: extractedDate
+        };
+        
+        currentDate = extractedDate;
+        continue;
+      }
+      
+      // Skip if we haven't found a transaction date yet
+      if (!currentTransaction || !currentDate) {
+        continue;
+      }
+      
+      // Look for amount patterns (+XXX,XXX or -XXX,XXX or just numbers)
+      const amountMatch = line.match(/([+\-])?([\d,.]+)/);
+      
+      if (amountMatch && !currentTransaction.amount) {
+        const sign = amountMatch[1] === '-' ? -1 : 1;
+        const amountStr = amountMatch[2].replace(/[,.]/g, '');
+        const amount = parseFloat(amountStr) * sign;
+        
+        currentTransaction.amount = amount;
+        
+        // Determine transaction type based on amount
+        currentTransaction.type = amount < 0 ? 'expense' : 'income';
+        
+        // Check if the next line might contain a balance
+        if (i + 1 < lines.length) {
+          const nextLine = lines[i + 1].trim();
+          const balanceMatch = nextLine.match(/^[\d,.]+$/);
+          
+          if (balanceMatch) {
+            currentTransaction.balance = parseFloat(nextLine.replace(/[,.]/g, ''));
+            i++; // Skip the balance line
+          }
+        }
+        
+        continue;
+      }
+      
+      // Try to extract other transaction details
+      if (currentTransaction) {
+        // If line contains transaction details keywords
+        if (line.includes('Transfer') || line.includes('Payment') || line.includes('Deposit')) {
+          currentTransaction.description = line;
+          
+          // Determine transaction type from description
+          if (line.includes('Incoming') || line.includes('Deposit')) {
+            currentTransaction.type = 'income';
+          } else if (line.includes('Outgoing') || line.includes('Payment')) {
+            currentTransaction.type = 'expense';
+          }
+        }
+        // If line looks like a source or destination
+        else if (!currentTransaction.source && !line.match(/^\d/) && !line.match(/^[+\-]/)) {
+          currentTransaction.source = line;
+        }
+        // If line looks like a note
+        else if (!currentTransaction.notes && line.length > 10) {
+          currentTransaction.notes = line;
+          
+          // Determine CAPEX vs OPEX based on notes
+          if (currentTransaction.type === 'expense') {
+            // Check for CAPEX keywords
+            for (const keyword of CAPEX_KEYWORDS) {
+              if (line.toUpperCase().includes(keyword)) {
+                currentTransaction.expenditureType = 'CAPEX';
                 break;
               }
             }
-          }
-          
-          // Default to OPEX if still undefined
-          if (!expenditureType) {
-            expenditureType = 'OPEX';
+            
+            // If not CAPEX, check for OPEX keywords
+            if (!currentTransaction.expenditureType) {
+              for (const keyword of OPEX_KEYWORDS) {
+                if (line.toUpperCase().includes(keyword)) {
+                  currentTransaction.expenditureType = 'OPEX';
+                  break;
+                }
+              }
+            }
+            
+            // Default to OPEX if still undefined
+            if (!currentTransaction.expenditureType) {
+              currentTransaction.expenditureType = 'OPEX';
+            }
           }
         }
-        
-        // Create transaction object
-        const transaction: Transaction = {
-          id: uuidv4(),
-          date,
-          amount: isIncome ? amount : -amount,
-          description: detailsPart,
-          source: sourcePart,
-          destination: destinationPart,
-          notes: notesPart,
-          balance,
-          type,
-          project,
-          expenditureType,
-        };
-        
-        transactions.push(transaction);
       }
+    }
+    
+    // Don't forget to add the last transaction if we have one
+    if (currentTransaction && currentTransaction.date && currentTransaction.amount) {
+      transactions.push({
+        id: uuidv4(),
+        date: currentTransaction.date,
+        amount: currentTransaction.amount,
+        description: currentTransaction.description || '',
+        source: currentTransaction.source || '',
+        destination: currentTransaction.destination || '',
+        notes: currentTransaction.notes || '',
+        balance: currentTransaction.balance || 0,
+        type: currentTransaction.type || 'transfer',
+        project: '',
+        expenditureType: currentTransaction.expenditureType,
+      } as Transaction);
+    }
+    
+    // Log what we found
+    console.log(`Found ${transactions.length} transactions`);
+    if (transactions.length === 0) {
+      console.error('No transactions found in the PDF');
+      throw new Error('No valid transactions were found in the PDF. Please ensure this is a Jago Codenito statement.');
     }
     
     // Sort transactions by date
     return transactions.sort((a, b) => a.date.getTime() - b.date.getTime());
   } catch (error) {
     console.error('Error parsing PDF:', error);
-    
-    // Better error handling with specific messages
-    if (error instanceof SyntaxError && error.message.includes('Unexpected token')) {
-      throw new Error('The server returned an HTML error page instead of PDF data. Please check your network connection and try again.');
-    }
-    
-    throw new Error('Failed to parse the PDF file: ' + (error instanceof Error ? error.message : String(error)));
+    throw new Error(error instanceof Error ? error.message : 'Failed to parse the PDF file');
   }
 }
